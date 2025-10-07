@@ -4,7 +4,7 @@
     {
       "type":"Feature",
       "properties": { "sec": "11123726" },
-      "geometry":{
+      "geometry":{{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[[-4.021168, 39.845828], [-4.020567, 39.847706], [-4.018614, 39.847492], [-4.01825, 39.846701], [-4.019129, 39.845845], [-4.021168, 39.845828]]]}, "properties": {}}
         "type":"Polygon",
         "coordinates":[[
           [-4.06, 39.86],
