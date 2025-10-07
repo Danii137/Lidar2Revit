@@ -6,6 +6,45 @@ from shapely.ops import unary_union
 import geopandas as gpd
 import io, json, requests, zipfile
 from datetime import datetime
+import re, requests
+
+def download_cnig_laz_by_sec(sec: str, timeout_sec=240):
+    """
+    Flujo oficial del Centro de Descargas:
+    1) GET initDescargaDir?secuencial=<sec>  -> devuelve {secuencialDescDir: ...}
+    2) POST descargaDir con secDescDirLA=<valor anterior> -> devuelve el .LAZ (binario)
+    """
+    s = requests.Session()
+    # 1) pedir id temporal
+    r1 = s.get(
+        "https://centrodedescargas.cnig.es/CentroDescargas/initDescargaDir",
+        params={"secuencial": sec},
+        timeout=30,
+    )
+    r1.raise_for_status()
+    j = r1.json()
+    sec_tmp = j.get("secuencialDescDir")
+    if not sec_tmp:
+        raise RuntimeError(f"No recibí 'secuencialDescDir' para sec={sec}. Respuesta: {j}")
+
+    # 2) bajar fichero
+    r2 = s.post(
+        "https://centrodedescargas.cnig.es/CentroDescargas/descargaDir",
+        data={"secDescDirLA": sec_tmp},
+        timeout=timeout_sec,
+        allow_redirects=True,
+    )
+    r2.raise_for_status()
+
+    # nombre de archivo desde cabecera
+    cd = r2.headers.get("Content-Disposition", "")
+    m = re.search(r'filename="?([^";]+)"?', cd)
+    fname = m.group(1) if m else f"{sec}.laz"
+    content = r2.content
+    if not content or len(content) < 1000:
+        # por si devolviera HTML de error en vez de LAZ
+        raise RuntimeError(f"Descarga sospechosa para sec={sec} (tamaño {len(content)} bytes)")
+    return fname, content
 
 st.set_page_config(page_title="LiDAR 2ª cobertura · Downloader", layout="wide")
 st.title("PNOA LiDAR 2ª cobertura (RGB) — v0.1")
