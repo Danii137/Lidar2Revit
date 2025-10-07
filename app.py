@@ -1,21 +1,49 @@
+# app.py — PNOA LiDAR 2ª cobertura · Downloader v0.1b
+import io, json, re, time, zipfile
+from datetime import datetime
+
+import requests
 import streamlit as st
+from shapely.geometry import shape, mapping
+from shapely.ops import unary_union
 from streamlit_folium import st_folium
 import folium
-from shapely.geometry import shape, Polygon, mapping
-from shapely.ops import unary_union
-import geopandas as gpd
-import io, json, requests, zipfile
-from datetime import datetime
-import re, requests
+
+# --------- Config ---------
+st.set_page_config(page_title="PNOA LiDAR 2ª — Downloader", layout="wide")
+st.title("PNOA LiDAR 2ª cobertura (RGB) — Downloader v0.1b")
+
+# --------- Helpers ---------
+def get_aoi_geom(folium_out):
+    feats = folium_out.get("all_drawings") or []
+    if not feats:
+        return None
+    geoms = [shape(f["geometry"]) for f in feats]
+    return unary_union(geoms).buffer(0)
+
+def load_index_geojson(file) -> list:
+    """Devuelve una lista de dicts: {'geom': shapely_geom, 'sec': str|None, 'url': str|None}"""
+    data = json.load(file)
+    feats = data.get("features", [])
+    tiles = []
+    for f in feats:
+        props = f.get("properties", {}) or {}
+        sec = props.get("sec")
+        url = props.get("url")
+        try:
+            geom = shape(f.get("geometry"))
+        except Exception:
+            continue
+        tiles.append({"geom": geom, "sec": (str(sec).strip() if sec else None), "url": (str(url).strip() if url else None)})
+    return tiles
 
 def download_cnig_laz_by_sec(sec: str, timeout_sec=240):
     """
     Flujo oficial del Centro de Descargas:
-    1) GET initDescargaDir?secuencial=<sec>  -> devuelve {secuencialDescDir: ...}
+    1) GET initDescargaDir?secuencial=<sec>  -> {secuencialDescDir: "..."}
     2) POST descargaDir con secDescDirLA=<valor anterior> -> devuelve el .LAZ (binario)
     """
     s = requests.Session()
-    # 1) pedir id temporal
     r1 = s.get(
         "https://centrodedescargas.cnig.es/CentroDescargas/initDescargaDir",
         params={"secuencial": sec},
@@ -27,7 +55,6 @@ def download_cnig_laz_by_sec(sec: str, timeout_sec=240):
     if not sec_tmp:
         raise RuntimeError(f"No recibí 'secuencialDescDir' para sec={sec}. Respuesta: {j}")
 
-    # 2) bajar fichero
     r2 = s.post(
         "https://centrodedescargas.cnig.es/CentroDescargas/descargaDir",
         data={"secDescDirLA": sec_tmp},
@@ -36,88 +63,93 @@ def download_cnig_laz_by_sec(sec: str, timeout_sec=240):
     )
     r2.raise_for_status()
 
-    # nombre de archivo desde cabecera
     cd = r2.headers.get("Content-Disposition", "")
     m = re.search(r'filename="?([^";]+)"?', cd)
     fname = m.group(1) if m else f"{sec}.laz"
     content = r2.content
     if not content or len(content) < 1000:
-        # por si devolviera HTML de error en vez de LAZ
-        raise RuntimeError(f"Descarga sospechosa para sec={sec} (tamaño {len(content)} bytes)")
+        # Por si el servidor devuelve HTML/JSON de error en lugar del LAZ
+        raise RuntimeError(f"Descarga sospechosa para sec={sec} (tamaño {len(content)} bytes).")
     return fname, content
 
-st.set_page_config(page_title="LiDAR 2ª cobertura · Downloader", layout="wide")
-st.title("PNOA LiDAR 2ª cobertura (RGB) — v0.1")
-
-st.markdown("1) Dibuja el AOI · 2) Sube **índice GeoJSON** con las teselas (campo `url`) · 3) Descarga")
-
-# --- MAPA + DRAW ---
-m = folium.Map(location=[40.3,-3.7], zoom_start=6, tiles="cartodbpositron")
-draw = folium.plugins.Draw(export=False, draw_options={
-    "polyline": False, "circle": False, "circlemarker": False,
-    "rectangle": True, "polygon": True, "marker": False
-})
+# --------- UI: mapa + dibujo ---------
+m = folium.Map(location=[40.3, -3.7], zoom_start=6, tiles="cartodbpositron")
+draw = folium.plugins.Draw(
+    export=False,
+    draw_options={
+        "polyline": False, "circle": False, "circlemarker": False,
+        "rectangle": True, "polygon": True, "marker": False
+    }
+)
 draw.add_to(m)
 out = st_folium(m, height=520, width=1000, returned_objects=["all_drawings"])
 
-def get_aoi_geom(out):
-    feats = out.get("all_drawings") or []
-    if not feats: 
-        return None
-    geoms = [shape(f["geometry"]) for f in feats]
-    return unary_union(geoms).buffer(0)
-
 aoi = get_aoi_geom(out)
 if not aoi:
-    st.info("Dibuja un **rectángulo** o **polígono** con el área de interés.")
+    st.info("Dibuja un **rectángulo** o **polígono** con el área de interés (AOI).")
     st.stop()
 
 st.success("AOI listo.")
-with st.expander("Ver AOI GeoJSON"):
-    st.code(json.dumps({"type":"Feature","geometry":mapping(aoi),"properties":{}}, ensure_ascii=False), language="json")
+with st.expander("Ver AOI (GeoJSON)"):
+    st.code(json.dumps({"type": "Feature", "geometry": mapping(aoi), "properties": {}}, ensure_ascii=False), language="json")
 
-# --- ÍNDICE DE TESELAS ---
-idx_file = st.file_uploader("Sube el **índice GeoJSON** de teselas LiDAR 2ª cobertura (con campo `url` al .LAZ)", type=["geojson","json"])
+# --------- Cargar índice de teselas ---------
+idx_file = st.file_uploader(
+    "Sube tu **índice GeoJSON** (cada feature con `properties.sec` o `properties.url`)",
+    type=["geojson", "json"]
+)
 if not idx_file:
-    st.warning("Falta el índice de teselas. Sube el GeoJSON (cada feature = tesela con `geometry` y `properties.url`).")
+    st.warning("Falta el índice de teselas. Sube el GeoJSON.")
     st.stop()
 
-gdf = gpd.read_file(idx_file)
-if "url" not in gdf.columns:
-    st.error("El GeoJSON no tiene columna `url`. Asegúrate de que cada tesela tenga `properties.url` con el enlace al .laz")
+tiles = load_index_geojson(idx_file)
+if not tiles:
+    st.error("No se pudieron leer teselas del GeoJSON. Revisa `features[].geometry` y `properties`.")
     st.stop()
 
-# Asegura CRS métrico (asumimos ETRS89 / UTM 30N; si viene en 4326, reproyecta)
-if gdf.crs is None:
-    st.warning("Índice sin CRS. Asumiendo EPSG:4326…")
-    gdf.set_crs(epsg=4326, inplace=True)
+# --------- Intersección AOI ↔ teselas ---------
+sel = [t for t in tiles if t["geom"].intersects(aoi)]
+st.write(f"Teselas encontradas que intersectan el AOI: **{len(sel)}**")
 
-# Reproyecta AOI al CRS del índice para intersectar correctamente
-aoi_gdf = gpd.GeoDataFrame(geometry=[aoi], crs="EPSG:4326")
-if aoi_gdf.crs != gdf.crs:
-    aoi_gdf = aoi_gdf.to_crs(gdf.crs)
+if sel:
+    # Tabla ligera
+    preview = []
+    for i, t in enumerate(sel[:50]):
+        preview.append({
+            "i": i,
+            "sec": t["sec"] or "",
+            "url": t["url"] or "",
+            "area_m2_aprox": round(t["geom"].area * (111_000**2), 2) if t["geom"].geom_type in ("Polygon","MultiPolygon") else ""
+        })
+    st.dataframe(preview)
 
-# Intersección
-sel = gdf[gdf.intersects(aoi_gdf.geometry.iloc[0])].copy()
-st.write(f"Teselas encontradas: **{len(sel)}**")
+# --------- Descarga a ZIP ---------
+if sel and st.button("Descargar teselas seleccionadas (.laz) como ZIP"):
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i, t in enumerate(sel):
+            try:
+                if t["sec"]:
+                    fname, data = download_cnig_laz_by_sec(t["sec"])
+                    zf.writestr(fname, data)
+                elif t["url"]:
+                    r = requests.get(t["url"], timeout=240, stream=True)
+                    r.raise_for_status()
+                    fname = t["url"].split("/")[-1].split("?")[0] or f"tile_{i}.laz"
+                    zf.writestr(fname, r.content)
+                else:
+                    zf.writestr(f"ERROR_{i}.txt", "Ni 'sec' ni 'url' definidos en la tesela.")
+                time.sleep(0.2)  # pequeño respiro para no saturar
+            except Exception as e:
+                zf.writestr(f"ERROR_{i}.txt", f"Fallo en tesela {i}: {repr(e)}")
+    mem.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    st.download_button(
+        f"Descargar ZIP ({len(sel)} teselas)",
+        data=mem.getvalue(),
+        file_name=f"pnoa_lidar_2c_{stamp}.zip",
+        mime="application/zip"
+    )
 
-if len(sel):
-    st.dataframe(sel[["url"]].assign(area_m2=sel.geometry.area.round(2)).head(50))
-    # Descargar todas en un ZIP en memoria
-    if st.button("Descargar teselas seleccionadas (.laz) como ZIP"):
-        mem = io.BytesIO()
-        with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for i, row in sel.iterrows():
-                url = row["url"]
-                try:
-                    with requests.get(url, stream=True, timeout=180) as r:
-                        r.raise_for_status()
-                        # nombre de archivo desde URL
-                        fname = url.split("/")[-1].split("?")[0] or f"tile_{i}.laz"
-                        zf.writestr(fname, r.content)
-                except Exception as e:
-                    zf.writestr(f"ERROR_{i}.txt", f"{url}\n{repr(e)}")
-        mem.seek(0)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(f"Descargar ZIP ({len(sel)} teselas)", data=mem.getvalue(),
-                           file_name=f"pnoa_lidar_2c_{stamp}.zip", mime="application/zip")
+st.divider()
+st.caption("Consejo: empieza con 1–3 teselas para probar. Si ves ficheros ERROR_*.txt en el ZIP, pásame el mensaje y lo pulimos.")
