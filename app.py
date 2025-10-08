@@ -454,7 +454,7 @@ if st.button("🚀 BUSCAR Y DESCARGAR AUTOMÁTICAMENTE", type="primary", use_con
             use_container_width=True,
             type="primary"
         )
-        
+    
         if exitosos > 0:
             st.balloons()
             st.success("🎉 ¡Descarga completada! Archivos listos para usar.")
